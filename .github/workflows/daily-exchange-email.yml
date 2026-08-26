@@ -1,0 +1,30 @@
+name: Daily Exchange Email
+
+on:
+  schedule:
+    # Weekdays at 9:00 AM BRT (12:00 UTC)
+    - cron: "0 12 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  send-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send exchange report
+        env:
+          GMAIL_SENDER: ${{ secrets.GMAIL_SENDER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+          EXCHANGE_PERCENTILE_THRESHOLD: ${{ secrets.EXCHANGE_PERCENTILE_THRESHOLD }}
+        run: python -m src.main
