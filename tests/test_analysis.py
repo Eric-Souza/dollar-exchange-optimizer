@@ -87,7 +87,7 @@ def test_format_percentile():
 
 
 def test_build_email_body_contains_key_sections():
-    from src.email_builder import build_email_body
+    from src.email_builder import build_email_body, build_email_html
 
     rolling = [DailyRate(date(2026, 7, d), 5.30) for d in range(1, 32)]
     rolling.append(DailyRate(date(2026, 8, 8), 5.45))
@@ -96,7 +96,14 @@ def test_build_email_body_contains_key_sections():
 
     report = build_report(month, rolling, reference=ref)
     body = build_email_body(report)
+    html_body = build_email_html(report)
 
     assert "USD/BRL Exchange Report" in body
-    assert "RECOMMENDATION:" in body
+    assert "RECOMMENDATION" not in body  # plain text uses verdict label first
+    assert "Good day" in body or "EXCHANGE" in body or "Neutral" in body or "Wait" in body
     assert "PTAX is a reference rate" in body
+
+    assert "Recommendation" in html_body
+    assert "USD → BRL" in html_body
+    assert "PTAX compra" in html_body
+    assert "This month" in html_body
