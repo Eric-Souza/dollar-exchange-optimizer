@@ -11,6 +11,14 @@ from src.email_builder import send_email
 from src.ptax import fetch_month_rates, fetch_rolling_rates
 
 
+def _env_float(name: str, default: float) -> float:
+    """Read a float env var, treating missing or blank values as default."""
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    return float(value)
+
+
 def _load_dotenv() -> None:
     """Load .env file if present (for local runs)."""
     env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
@@ -29,7 +37,7 @@ def main() -> int:
     _load_dotenv()
 
     reference = date.today()
-    early_month_threshold = float(os.environ.get("EXCHANGE_PERCENTILE_THRESHOLD", "75"))
+    early_month_threshold = _env_float("EXCHANGE_PERCENTILE_THRESHOLD", 75.0)
 
     month_rates = fetch_month_rates(reference)
     rolling_rates = fetch_rolling_rates(days=30, reference=reference)
