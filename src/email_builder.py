@@ -73,6 +73,21 @@ def build_email_subject(report: ExchangeReport) -> str:
     return f"USD/BRL: {report.verdict.value} — {report.reference_date.strftime('%b %d')}"
 
 
+def _require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise ValueError(
+            f"Missing required environment variable: {name}. "
+            "Set it in GitHub Actions secrets or your local .env file."
+        )
+    return value
+
+
+def _normalize_app_password(password: str) -> str:
+    """Gmail app passwords are often copied with spaces (xxxx xxxx xxxx xxxx)."""
+    return password.replace(" ", "")
+
+
 def send_email(
     report: ExchangeReport,
     sender: str | None = None,
@@ -80,9 +95,9 @@ def send_email(
     recipient: str | None = None,
 ) -> None:
     """Send the exchange report via Gmail SMTP."""
-    sender = sender or os.environ["GMAIL_SENDER"]
-    password = password or os.environ["GMAIL_APP_PASSWORD"]
-    recipient = recipient or os.environ.get("EMAIL_RECIPIENT", sender)
+    sender = (sender or _require_env("GMAIL_SENDER")).strip()
+    password = _normalize_app_password(password or _require_env("GMAIL_APP_PASSWORD"))
+    recipient = (recipient or os.environ.get("EMAIL_RECIPIENT", sender)).strip()
 
     msg = MIMEMultipart()
     msg["From"] = sender
@@ -90,6 +105,15 @@ def send_email(
     msg["Subject"] = build_email_subject(report)
     msg.attach(MIMEText(build_email_body(report), "plain"))
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(sender, password)
-        server.sendmail(sender, recipient, msg.as_string())
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender, password)
+            server.sendmail(sender, recipient, msg.as_string())
+    except smtplib.SMTPAuthenticationError as exc:
+        raise smtplib.SMTPAuthenticationError(
+            exc.smtp_code,
+            "Gmail rejected the login. Use a Gmail App Password (not your normal "
+            "password), ensure GMAIL_SENDER matches the account that created it, "
+            "and regenerate the app password at https://myaccount.google.com/apppasswords "
+            f"Original error: {exc.smtp_error!r}",
+        ) from exc
