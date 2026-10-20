@@ -17,6 +17,7 @@ FOCUS_URL = (
     "ExpectativaMercadoMensais"
 )
 SELIC_TARGET_URL = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.432/dados/ultimos/1"
+COPOM_URL = "https://www.bcb.gov.br/api/servico/sitebcb/copom/comunicados"
 AWESOMEAPI_DAILY_URL = "https://economia.awesomeapi.com.br/json/daily/{pair}/6"
 
 # EUR-USD tracks the global dollar (inverse); the others are EM peers of the real.
@@ -71,6 +72,16 @@ def fetch_selic_target() -> float:
     return float(response.json()[-1]["valor"])
 
 
+def fetch_last_copom() -> dict[str, Any]:
+    """Most recent Copom decision (date and headline)."""
+    response = requests.get(
+        COPOM_URL, params={"quantidade": 1}, headers={"User-Agent": "Mozilla/5.0"}, timeout=30
+    )
+    response.raise_for_status()
+    latest = response.json()["conteudo"][0]
+    return {"date": latest["dataReferencia"], "decision": " ".join(latest["titulo"].split())}
+
+
 def parse_daily_moves(entries: list[dict[str, Any]]) -> dict[str, float]:
     """1-day and 5-day % moves from AwesomeAPI daily quotes (newest first)."""
     bids = [float(e["bid"]) for e in entries]
@@ -100,6 +111,7 @@ def fetch_market_context(reference: date) -> dict[str, Any]:
     sources = {
         "focus_survey_usdbrl_by_month": lambda: fetch_focus_expectations(reference),
         "selic_target_pct": fetch_selic_target,
+        "last_copom": fetch_last_copom,
         "peer_currencies": fetch_peer_moves,
     }
     for key, fetch in sources.items():
