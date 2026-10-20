@@ -1,15 +1,21 @@
 """Tests for percentile calculation and recommendation logic."""
 
-from datetime import date
+from datetime import date, timedelta
 
 from src.analysis import (
     Verdict,
     build_report,
     compute_month_stats,
+    compute_signals,
     format_percentile,
     percentile_rank,
 )
-from src.ptax import DailyRate
+from src.ptax import DailyRate, TodayQuote
+
+
+def _history(*groups: list[DailyRate]) -> list[DailyRate]:
+    """Merge rate lists into one history, de-duplicated by date."""
+    return list({r.date: r for group in groups for r in group}.values())
 
 
 def _rates(values: list[tuple[int, float]], year: int = 2026, month: int = 8) -> list[DailyRate]:
@@ -49,7 +55,7 @@ def test_build_report_exchange_today_high_percentile():
     month = _rates([(1, 5.10), (2, 5.15), (3, 5.20), (4, 5.25), (5, 5.50)])
     ref = date(2026, 8, 5)
 
-    report = build_report(month, rolling, reference=ref)
+    report = build_report(_history(rolling, month), reference=ref)
 
     assert report.today_rate == 5.50
     assert report.verdict == Verdict.EXCHANGE_TODAY
@@ -63,7 +69,7 @@ def test_build_report_wait_low_percentile():
     month = [DailyRate(date(2026, 8, d), 5.10 + d * 0.01) for d in range(1, 11)]
     ref = date(2026, 8, 3)
 
-    report = build_report(month, rolling, reference=ref)
+    report = build_report(_history(rolling, month), reference=ref)
 
     assert report.verdict == Verdict.WAIT
 
@@ -75,7 +81,7 @@ def test_build_report_early_month_lean_exchange():
     month = _rates([(1, 5.40), (2, 5.42), (3, 5.44), (4, 5.43), (5, 5.45)])
     ref = date(2026, 8, 5)
 
-    report = build_report(month, rolling, reference=ref, early_month_threshold=75)
+    report = build_report(_history(rolling, month), reference=ref, early_month_threshold=75)
 
     assert report.verdict == Verdict.EXCHANGE_TODAY
     assert report.early_month_note is not None
@@ -94,7 +100,7 @@ def test_build_email_body_contains_key_sections():
     month = [DailyRate(date(2026, 8, d), 5.35 + d * 0.01) for d in range(1, 9)]
     ref = date(2026, 8, 8)
 
-    report = build_report(month, rolling, reference=ref)
+    report = build_report(_history(rolling, month), reference=ref)
     body = build_email_body(report)
     html_body = build_email_html(report)
 
@@ -107,3 +113,65 @@ def test_build_email_body_contains_key_sections():
     assert "USD → BRL" in html_body
     assert "PTAX compra" in html_body
     assert "This month" in html_body
+
+
+def test_build_report_no_quote_is_explicit():
+    rolling = [DailyRate(date(2026, 7, d), 5.30) for d in range(1, 32)]
+
+    report = build_report(rolling, reference=date(2026, 8, 3))
+
+    assert report.today_rate is None
+    assert report.verdict == Verdict.NO_QUOTE
+    assert report.signals is None
+
+
+def test_build_report_uses_intraday_quote():
+    rolling = [DailyRate(date(2026, 7, d), 5.30) for d in range(1, 32)]
+    quote = TodayQuote(5.45, "PTAX compra (intermediário 11:00)", is_final=False)
+
+    report = build_report(rolling, reference=date(2026, 8, 3), today_quote=quote)
+
+    assert report.today_rate == 5.45
+    assert report.rate_source == "PTAX compra (intermediário 11:00)"
+    assert not report.rate_is_final
+    assert report.verdict == Verdict.EXCHANGE_TODAY
+
+
+def test_compute_signals_trend_and_changes():
+    ref = date(2026, 8, 31)
+    past = [DailyRate(ref - timedelta(days=30 - i), 5.0 + i * 0.01) for i in range(30)]
+
+    signals = compute_signals(past, 5.40, ref)
+
+    assert signals.trend == "up"
+    assert signals.change_1d_pct is not None and signals.change_1d_pct > 0
+    assert signals.zscore_30d is not None and signals.zscore_30d > 1
+    assert signals.volatility_20d_pct is not None
+
+
+def test_compute_signals_short_history():
+    ref = date(2026, 8, 5)
+    past = [DailyRate(date(2026, 8, d), 5.0) for d in (1, 2, 3)]
+
+    signals = compute_signals(past, 5.0, ref)
+
+    assert signals.quarter_percentile is None
+    assert signals.ma20 is None
+    assert signals.trend is None
+    assert signals.zscore_30d is None
+
+
+def test_quarter_percentile_upgrades_neutral():
+    # Last 30 days hover at a high plateau; the prior 60 days were much lower.
+    ref = date(2026, 8, 20)
+    low = [DailyRate(ref - timedelta(days=d), 5.00) for d in range(31, 91)]
+    plateau = [
+        DailyRate(ref - timedelta(days=d), 5.40 + (0.01 if d % 2 else -0.01))
+        for d in range(1, 31)
+    ]
+    quote = TodayQuote(5.40, "PTAX compra (closing)", is_final=True)
+
+    report = build_report(low + plateau, reference=ref, today_quote=quote)
+
+    assert report.signals.quarter_percentile >= 80
+    assert report.verdict == Verdict.GOOD_DAY

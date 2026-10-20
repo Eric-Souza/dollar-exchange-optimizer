@@ -8,7 +8,8 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from src.analysis import ExchangeReport, Verdict, format_percentile
+from src.ai_advisor import AIOpinion, Outlook
+from src.analysis import ExchangeReport, Signals, Verdict, format_percentile
 
 VERDICT_STYLES: dict[Verdict, dict[str, str]] = {
     Verdict.EXCHANGE_TODAY: {
@@ -39,7 +40,16 @@ VERDICT_STYLES: dict[Verdict, dict[str, str]] = {
         "text": "#334155",
         "accent": "#64748b",
     },
+    Verdict.NO_QUOTE: {
+        "label": "No quote yet",
+        "bg": "#f8fafc",
+        "border": "#cbd5e1",
+        "text": "#475569",
+        "accent": "#94a3b8",
+    },
 }
+
+TREND_LABELS = {"up": "Rising", "down": "Falling", "flat": "Flat"}
 
 
 def _verdict_style(verdict: Verdict) -> dict[str, str]:
@@ -58,11 +68,57 @@ def _percentile_value(value: float | None) -> float:
     return max(0.0, min(100.0, value))
 
 
-def build_email_subject(report: ExchangeReport) -> str:
-    return f"USD/BRL: {report.verdict.value} — {report.reference_date.strftime('%b %d')}"
+def _format_signed(value: float | None, suffix: str = "%") -> str:
+    if value is None:
+        return "N/A"
+    return f"{value:+.2f}{suffix}"
 
 
-def build_email_body(report: ExchangeReport) -> str:
+def _signal_lines(signals: Signals) -> list[tuple[str, str]]:
+    """Label/value pairs for the signals section."""
+    trend = TREND_LABELS.get(signals.trend or "", "N/A")
+    if signals.ma5 is not None and signals.ma20 is not None:
+        trend += f" (5d avg {signals.ma5:.4f} vs 20d {signals.ma20:.4f})"
+    volatility = (
+        f"{signals.volatility_20d_pct:.2f}% per day (20d)"
+        if signals.volatility_20d_pct is not None
+        else "N/A"
+    )
+    return [
+        ("90-day rank", format_percentile(signals.quarter_percentile)),
+        ("Trend", trend),
+        ("vs 30d average", _format_signed(signals.zscore_30d, " σ")),
+        ("1-day change", _format_signed(signals.change_1d_pct)),
+        ("5-day change", _format_signed(signals.change_5d_pct)),
+        ("Volatility", volatility),
+    ]
+
+
+def _ai_headline(ai: AIOpinion) -> str:
+    verdict = ai.verdict.value if ai.verdict else "No verdict"
+    return f"{verdict} ({ai.confidence} confidence)" if ai.confidence else verdict
+
+
+OUTLOOK_LABELS = {
+    "up": "Dollar may rise ↑ — waiting could pay off",
+    "down": "Dollar may fall ↓ — waiting could cost you",
+    "sideways": "Dollar likely flat → — little gain from waiting",
+}
+
+
+def _outlook_headline(outlook: Outlook) -> str:
+    label = OUTLOOK_LABELS[outlook.direction]
+    return f"{label} ({outlook.confidence} confidence)" if outlook.confidence else label
+
+
+def build_email_subject(report: ExchangeReport, ai: AIOpinion | None = None) -> str:
+    subject = f"USD/BRL: {report.verdict.value} — {report.reference_date.strftime('%b %d')}"
+    if ai and ai.verdict and ai.verdict != report.verdict:
+        subject += f" (AI: {ai.verdict.value})"
+    return subject
+
+
+def build_email_body(report: ExchangeReport, ai: AIOpinion | None = None) -> str:
     """Build plain-text email body (fallback for non-HTML clients)."""
     date_str = report.reference_date.strftime("%B %d, %Y")
     style = _verdict_style(report.verdict)
@@ -76,7 +132,7 @@ def build_email_body(report: ExchangeReport) -> str:
     ]
 
     if report.today_rate is not None:
-        lines.append(f"Today's rate (PTAX compra): {_format_rate(report.today_rate)}")
+        lines.append(f"Today's rate: {_format_rate(report.today_rate)} — {report.rate_source}")
     else:
         lines.append("Today's rate: N/A (no quote published yet)")
 
@@ -101,6 +157,28 @@ def build_email_body(report: ExchangeReport) -> str:
                 f"  Avg:   {_format_rate(stats.average)}",
             ]
         )
+
+    if report.signals:
+        lines.extend(["", "Signals"])
+        lines.extend(f"  {label}: {value}" for label, value in _signal_lines(report.signals))
+
+    if ai:
+        lines.extend(["", f"AI second opinion: {_ai_headline(ai)}", ai.summary])
+        for title, items in (("Drivers", ai.drivers), ("Risks", ai.risks)):
+            if items:
+                lines.append(f"  {title}:")
+                lines.extend(f"  - {item}" for item in items)
+        if ai.outlook:
+            lines.extend(
+                ["", f"Next 5 trading days: {_outlook_headline(ai.outlook)}", ai.outlook.reasoning]
+            )
+            if ai.outlook.key_events:
+                lines.append("  Upcoming events:")
+                lines.extend(f"  - {event}" for event in ai.outlook.key_events)
+            lines.append("  (Short-term FX calls are close to a coin flip; treat as context.)")
+        if ai.sources:
+            lines.append("  Sources:")
+            lines.extend(f"  - {title}: {uri}" for title, uri in ai.sources)
 
     if report.early_month_note:
         lines.extend(["", report.early_month_note])
@@ -149,7 +227,93 @@ def _html_percentile_row(label: str, percentile: float | None, subtitle: str = "
     """
 
 
-def build_email_html(report: ExchangeReport) -> str:
+def _html_section_label(text: str) -> str:
+    return (
+        '<div style="font-size:12px;font-weight:700;letter-spacing:0.08em;'
+        f'text-transform:uppercase;color:#64748b;margin-bottom:4px;">{html.escape(text)}</div>'
+    )
+
+
+def _html_signals(signals: Signals | None) -> str:
+    if signals is None:
+        return ""
+    rows = "".join(
+        f"""
+                <tr>
+                  <td style="padding:6px 0;color:#475569;font-size:13px;width:140px;">{html.escape(label)}</td>
+                  <td style="padding:6px 0;color:#0f172a;font-size:13px;font-weight:600;">{html.escape(value)}</td>
+                </tr>"""
+        for label, value in _signal_lines(signals)
+    )
+    return f"""
+          <tr>
+            <td style="padding:16px 28px 0;">
+              {_html_section_label("Signals")}
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">{rows}
+              </table>
+            </td>
+          </tr>"""
+
+
+def _html_list(title: str, items: list[str]) -> str:
+    if not items:
+        return ""
+    entries = "".join(f'<li style="margin:2px 0;">{html.escape(item)}</li>' for item in items)
+    return (
+        f'<div style="font-size:12px;font-weight:700;margin-top:10px;">{html.escape(title)}</div>'
+        f'<ul style="margin:4px 0 0;padding-left:18px;">{entries}</ul>'
+    )
+
+
+def _html_ai(ai: AIOpinion | None) -> str:
+    if ai is None:
+        return ""
+    sources = ""
+    if ai.sources:
+        links = " · ".join(
+            f'<a href="{html.escape(uri)}" style="color:#6d28d9;">{html.escape(title)}</a>'
+            for title, uri in ai.sources
+        )
+        sources = f'<div style="font-size:11px;margin-top:10px;">Sources: {links}</div>'
+    outlook = ""
+    if ai.outlook:
+        outlook = f"""
+                    <div style="margin-top:14px;padding-top:12px;border-top:1px solid #ddd6fe;">
+                      <div style="font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#7c3aed;">
+                        Next 5 trading days
+                      </div>
+                      <div style="font-size:15px;font-weight:700;margin-top:4px;">{html.escape(_outlook_headline(ai.outlook))}</div>
+                      <div style="margin-top:6px;">{html.escape(ai.outlook.reasoning)}</div>
+                      {_html_list("Upcoming events", ai.outlook.key_events)}
+                      <div style="font-size:11px;color:#6b21a8;margin-top:8px;opacity:0.8;">
+                        Short-term FX calls are close to a coin flip — treat this as context, not a forecast to bet on.
+                      </div>
+                    </div>"""
+    via = ai.model + (" + Google Search" if ai.used_search else "")
+    return f"""
+          <tr>
+            <td style="padding:16px 28px 0;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                <tr>
+                  <td style="padding:16px 18px;background:#f5f3ff;border:1px solid #c4b5fd;border-radius:12px;color:#3b0764;font-size:13px;line-height:1.55;">
+                    <div style="font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#7c3aed;">
+                      AI second opinion
+                    </div>
+                    <div style="font-size:18px;font-weight:800;margin-top:4px;">{html.escape(_ai_headline(ai))}</div>
+                    <div style="margin-top:8px;">{html.escape(ai.summary)}</div>
+                    {_html_list("Drivers", ai.drivers)}
+                    {_html_list("Risks", ai.risks)}
+                    {outlook}
+                    {sources}
+                    <div style="font-size:11px;color:#7c3aed;margin-top:10px;">via {html.escape(via)}</div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>"""
+
+
+def build_email_html(report: ExchangeReport, ai: AIOpinion | None = None) -> str:
     """Build HTML email body with verdict-first layout."""
     date_str = report.reference_date.strftime("%B %d, %Y")
     style = _verdict_style(report.verdict)
@@ -215,7 +379,7 @@ def build_email_html(report: ExchangeReport) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{html.escape(build_email_subject(report))}</title>
+  <title>{html.escape(build_email_subject(report, ai))}</title>
 </head>
 <body style="margin:0;padding:0;background:#eef2f7;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#eef2f7;padding:24px 12px;">
@@ -255,7 +419,7 @@ def build_email_html(report: ExchangeReport) -> str:
                 Today
               </div>
               <div style="font-size:32px;font-weight:800;color:#0f172a;letter-spacing:-0.02em;">{html.escape(rate_display)}</div>
-              <div style="font-size:12px;color:#64748b;margin-top:4px;">PTAX compra (reference rate when selling USD)</div>
+              <div style="font-size:12px;color:#64748b;margin-top:4px;">{html.escape(report.rate_source or "No quote available")} · reference rate when selling USD</div>
             </td>
           </tr>
           <tr>
@@ -266,8 +430,10 @@ def build_email_html(report: ExchangeReport) -> str:
               </table>
             </td>
           </tr>
+          {_html_ai(ai)}
+          {_html_signals(report.signals)}
           <tr>
-            <td style="padding:8px 28px 24px;">
+            <td style="padding:16px 28px 24px;">
               <div style="font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#64748b;margin-bottom:4px;">
                 This month
               </div>
@@ -308,6 +474,7 @@ def _normalize_app_password(password: str) -> str:
 
 def send_email(
     report: ExchangeReport,
+    ai: AIOpinion | None = None,
     sender: str | None = None,
     password: str | None = None,
     recipient: str | None = None,
@@ -320,9 +487,9 @@ def send_email(
     msg = MIMEMultipart("alternative")
     msg["From"] = sender
     msg["To"] = recipient
-    msg["Subject"] = build_email_subject(report)
-    msg.attach(MIMEText(build_email_body(report), "plain", "utf-8"))
-    msg.attach(MIMEText(build_email_html(report), "html", "utf-8"))
+    msg["Subject"] = build_email_subject(report, ai)
+    msg.attach(MIMEText(build_email_body(report, ai), "plain", "utf-8"))
+    msg.attach(MIMEText(build_email_html(report, ai), "html", "utf-8"))
 
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
