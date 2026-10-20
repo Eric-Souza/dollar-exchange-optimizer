@@ -44,6 +44,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          [ -f data/forecasts.json ] || exit 0
           git add data/forecasts.json
           if git diff --cached --quiet; then exit 0; fi
           git commit -m "chore: record daily forecast [skip ci]"
