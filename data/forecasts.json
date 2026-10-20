@@ -1,0 +1,11 @@
+[
+ {
+  "date": "2026-10-20",
+  "rate": 5.0134,
+  "rule_verdict": "WAIT",
+  "ai_verdict": "WAIT",
+  "direction": "sideways",
+  "confidence": "low",
+  "model": "gemini-3.1-flash-lite"
+ }
+]
