@@ -6,8 +6,13 @@ Sends a daily email recommending the best time to exchange USD salary into Brazi
 
 1. Fetches official **PTAX** buy rates from the [Banco Central do Brasil](https://olinda.bcb.gov.br/olinda/servico/PTAX/versao/v1/documentacao): 120 days of closing rates plus today's latest bulletin (opening ~10:00, intermediate ~11:00/12:00, closing ~13:05 BRT). Before the first bulletin, it falls back to a live market quote from [AwesomeAPI](https://docs.awesomeapi.com.br/api-de-moedas).
 2. Computes today's percentile versus the last 30 days, the current month and the last 90 days, plus trend (5-day vs 20-day average), z-score, recent changes and volatility.
-3. Optionally asks **Google Gemini** (free tier) for a second opinion and a 5-trading-day outlook, using the numbers above, market context (BACEN Focus survey, Selic, peer currencies) and Google Search for news and upcoming events.
-4. Sends an email with a recommendation: **EXCHANGE TODAY**, **GOOD DAY**, **NEUTRAL**, **WAIT**, or **NO QUOTE** (holiday / nothing published yet).
+3. Gathers free market context: BACEN Focus survey, Selic and the last Copom decision, peer currencies and the last two days of FX headlines.
+4. Optionally asks **Google Gemini** (free tier) for a second opinion and a 5-trading-day outlook, using all of the above plus its own past track record.
+5. Sends one email per day with a recommendation (**EXCHANGE TODAY**, **GOOD DAY**, **NEUTRAL**, **WAIT**, or **NO QUOTE** for holidays / nothing published yet) and:
+   - an at-a-glance strip (today's rate, gap to the month best, AI outlook, weekdays left),
+   - your salary in BRL today vs the month best and average (set `SALARY_USD`),
+   - a 30-trading-day bar chart, market context, signals and top headlines,
+   - the AI's opinion with its hit rate on past 5-day outlooks.
 
 The logic is tuned for receiving USD at the **start of the month** — days 1–10 are treated as your primary exchange window.
 
@@ -36,18 +41,25 @@ python -m src.main
 
 Without a key, the email is sent with the rule-based verdict only. If the Gemini call fails, the email still goes out.
 
-The AI receives today's numbers, 90 days of PTAX closings and market context from free, keyless APIs:
+The AI receives today's numbers, 90 days of PTAX closings and context from free, keyless sources:
 
 | Context | Source |
 |---|---|
 | Market median USD/BRL expectation for this and next month | BACEN Focus survey |
-| Selic target rate | BACEN SGS series 432 |
+| Selic target rate and the last Copom decision | BACEN SGS series 432, BCB Copom API |
 | 1-day / 5-day moves of EUR/USD, USD/MXN, USD/CLP, USD/ZAR | AwesomeAPI |
-| Recent news and the next 5 trading days' events (FOMC, Copom, payrolls, IPCA) | Google Search grounding |
+| Headlines from the last 2 days (Brazilian FX and global dollar) | Google News RSS |
+| Its own past 5-day outlooks, scored against real closings | `data/forecasts.json` |
+| More news and upcoming events (FOMC, Copom, payrolls, IPCA) | Google Search grounding, when the key has quota |
+| FOMC meeting calendar | federalreserve.gov, read via Gemini's URL context tool |
 
-It returns its own verdict, drivers, risks and an outlook (up / down / sideways over 5 trading days). Short-term FX direction is close to a coin flip, so treat the outlook as context. Search grounding has its own quota (some free-tier keys get none without billing enabled); if it's rejected, the call is retried without search and the model is told not to cite news. Free-tier models are often overloaded, so each model is retried and then `gemini-flash-lite-latest` is used as a fallback.
+It returns its own verdict, drivers, risks and an outlook (up / down / sideways over 5 trading days). Short-term FX direction is close to a coin flip, so treat the outlook as context. The email shows how often past outlooks were right.
 
-Optional settings: `GEMINI_MODEL` (default `gemini-flash-latest`), `GEMINI_USE_SEARCH` (default `true`).
+**Picking the model.** Free-tier access changes over time, so each run lists the models the key can use and tries them best first: pro, then flash, then flash-lite, newest version first. For each model it tries Search + URL context, then URL context only, then no tools. A tool that gets refused (429/400) is dropped for the rest of the run. Overloaded models (503 or timeout) get one more try at the end. The whole AI step is capped at about 6 minutes; if nothing answers, the email still goes out with the rule-based verdict.
+
+**Track record.** After each email is sent, the workflow appends that day's rate, verdicts and AI outlook to `data/forecasts.json` and commits it to `main` (`[skip ci]`). Dry runs never write to it.
+
+Optional settings: `GEMINI_MODEL` (pin a model to try first), `GEMINI_USE_SEARCH` (default `true`), `SALARY_USD`.
 
 Note: on Gemini's free tier, Google may use prompts to improve its products. The prompts here contain only public market data.
 
@@ -62,9 +74,10 @@ Push this repo to GitHub, then add these **repository secrets** (Settings → Se
 | `EMAIL_RECIPIENT` | `eric.bh18souza@gmail.com` |
 | `EXCHANGE_PERCENTILE_THRESHOLD` | Optional; default `75` |
 | `GEMINI_API_KEY` | Optional; enables the AI second opinion |
-| `GEMINI_MODEL` | Optional; default `gemini-flash-latest` |
+| `GEMINI_MODEL` | Optional; model to try first (default: best available) |
+| `SALARY_USD` | Optional; monthly salary in USD for the BRL calculator |
 
-The workflow is scheduled for **weekdays at ~10:23 BRT** (13:23 UTC), after BACEN's first bulletin. GitHub often delays scheduled runs by an hour or more; the email shows which quote it used (intraday bulletin, closing, or market bid). You can also trigger it manually from the Actions tab via **Run workflow**.
+The workflow is scheduled for **weekdays at ~10:23 BRT** (13:23 UTC), after BACEN's first bulletin. GitHub often delays scheduled runs by an hour or more; the email shows which quote it used (intraday bulletin, closing, or market bid). You can also trigger it manually from the Actions tab via **Run workflow**. The workflow needs `contents: write` (already set in the YAML) to commit the forecast log.
 
 ## Running tests
 

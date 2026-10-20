@@ -8,6 +8,10 @@ on:
     - cron: "23 13 * * 1-5"
   workflow_dispatch:
 
+# Needed to commit the forecast log back to main.
+permissions:
+  contents: write
+
 jobs:
   send-report:
     runs-on: ubuntu-latest
@@ -32,4 +36,16 @@ jobs:
           EXCHANGE_PERCENTILE_THRESHOLD: ${{ secrets.EXCHANGE_PERCENTILE_THRESHOLD }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          SALARY_USD: ${{ secrets.SALARY_USD }}
         run: python -m src.main
+
+      - name: Save forecast log
+        # Lets the next runs score the AI's outlooks against what really happened.
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/forecasts.json
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "chore: record daily forecast [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main

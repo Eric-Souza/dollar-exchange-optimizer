@@ -7,9 +7,17 @@ import pytest
 import requests
 
 from src import ai_advisor
-from src.ai_advisor import build_prompt, get_ai_opinion, parse_gemini_response
+from src.ai_advisor import (
+    build_prompt,
+    discover_models,
+    get_ai_opinion,
+    parse_gemini_response,
+    rank_models,
+)
 from src.analysis import Verdict, build_report
 from src.email_builder import build_email_body, build_email_html, build_email_subject
+from src.forecast_log import ScoredForecast, TrackRecord
+from src.news import Headline
 from src.ptax import DailyRate
 
 REPLY = {
@@ -52,24 +60,26 @@ def _no_retry_delay(monkeypatch):
     monkeypatch.setattr(ai_advisor, "RETRY_DELAY_SECONDS", 0)
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
     monkeypatch.delenv("GEMINI_USE_SEARCH", raising=False)
+    monkeypatch.setattr(ai_advisor, "discover_models", lambda key: list(ai_advisor.STATIC_MODELS))
 
 
 def test_parse_gemini_response_with_fences_and_sources():
     text = "```json\n" + json.dumps(REPLY) + "\n```"
     grounding = {"groundingChunks": [{"web": {"uri": "https://example.com/a", "title": "Valor"}}]}
 
-    opinion = parse_gemini_response(_payload(text, grounding), "gemini-x", used_search=True)
+    opinion = parse_gemini_response(_payload(text, grounding), "gemini-x", tools=("google_search",))
 
     assert opinion.verdict == Verdict.WAIT
     assert opinion.confidence == "medium"
     assert opinion.drivers == ["Fed cut expectations", "Fiscal noise"]
     assert opinion.sources == [("Valor", "https://example.com/a")]
     assert opinion.used_search
+    assert opinion.via == "gemini-x + Google Search"
 
 
 def test_parse_gemini_response_unknown_verdict():
     reply = dict(REPLY, verdict="SELL EVERYTHING", confidence="extreme")
-    opinion = parse_gemini_response(_payload(json.dumps(reply)), "gemini-x", used_search=False)
+    opinion = parse_gemini_response(_payload(json.dumps(reply)), "gemini-x")
     assert opinion.verdict is None
     assert opinion.confidence is None
 
@@ -85,13 +95,32 @@ def test_build_prompt_contains_data():
     assert all(day != "2026-08-05" for day, _ in data["ptax_closing_history"])
 
 
+def test_build_prompt_includes_headlines_and_track_record():
+    report, history = _report()
+    headlines = [Headline("Dólar sobe com Fed", "Valor", "https://x", None)]
+    track = TrackRecord(
+        scored=[
+            ScoredForecast(
+                date(2026, 7, 20), "up", "low", 5.3, date(2026, 7, 27), 5.2, -1.9, "down"
+            )
+        ],
+        pending=2,
+    )
+
+    data = json.loads(build_prompt(report, history, None, headlines, track).split("\n", 1)[1])
+
+    assert data["recent_headlines"][0]["title"] == "Dólar sobe com Fed"
+    assert data["your_track_record"]["correct"] == 0
+    assert data["your_track_record"]["recent"][0]["actual"] == "down"
+
+
 def test_get_ai_opinion_disabled_without_key(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     report, history = _report()
     assert get_ai_opinion(report, history) is None
 
 
-def test_get_ai_opinion_falls_back_without_search(monkeypatch):
+def test_get_ai_opinion_drops_refused_tools(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     calls = []
 
@@ -107,14 +136,38 @@ def test_get_ai_opinion_falls_back_without_search(monkeypatch):
     opinion = get_ai_opinion(report, history)
 
     assert opinion is not None and opinion.verdict == Verdict.WAIT
-    assert not opinion.used_search
-    assert len(calls) == 2
-    assert calls[0]["tools"] == [{"google_search": {}}]
+    assert opinion.tools == () and not opinion.used_search
+    assert [c.get("tools") for c in calls] == [
+        [{"google_search": {}}, {"url_context": {}}],
+        [{"url_context": {}}],
+        None,
+    ]
+
+
+def test_get_ai_opinion_keeps_url_context_when_only_search_refused(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(json)
+        if {"google_search": {}} in json.get("tools", []):
+            return _Response(status=429)
+        return _Response(_payload(ai_advisor.json.dumps(REPLY)))
+
+    monkeypatch.setattr(ai_advisor.requests, "post", fake_post)
+    report, history = _report()
+
+    opinion = get_ai_opinion(report, history)
+
+    assert opinion.tools == ("url_context",)
+    assert opinion.via == "gemini-flash-latest + URL reading"
+    prompt = calls[-1]["contents"][0]["parts"][0]["text"]
+    assert "fomccalendars" in prompt
+    assert "Web search is unavailable" in prompt
 
 
 def test_get_ai_opinion_falls_back_to_lighter_model(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.setenv("GEMINI_USE_SEARCH", "false")
     urls = []
 
     def fake_post(url, headers, json, timeout):
@@ -129,7 +182,32 @@ def test_get_ai_opinion_falls_back_to_lighter_model(monkeypatch):
     opinion = get_ai_opinion(report, history)
 
     assert opinion is not None and opinion.model == "gemini-flash-lite-latest"
-    assert len(urls) == ai_advisor.ATTEMPTS_PER_MODEL + 1
+    assert opinion.used_search  # a 503 is not blamed on the tools
+    assert len(urls) == 2
+
+
+def test_get_ai_opinion_skips_model_without_quota(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GEMINI_USE_SEARCH", "false")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-9-pro")
+    urls = []
+
+    def fake_post(url, headers, json, timeout):
+        urls.append(url)
+        if "tools" in json:
+            return _Response(status=400)
+        if "pro" in url:
+            return _Response(status=429)
+        return _Response(_payload(ai_advisor.json.dumps(REPLY)))
+
+    monkeypatch.setattr(ai_advisor.requests, "post", fake_post)
+    report, history = _report()
+
+    opinion = get_ai_opinion(report, history)
+
+    assert opinion.model == "gemini-flash-latest"
+    assert opinion.tools == ()
+    assert sum("pro" in u for u in urls) == 2  # with url_context, then plain; no retry
 
 
 def test_get_ai_opinion_returns_none_on_total_failure(monkeypatch):
@@ -144,12 +222,56 @@ def test_get_ai_opinion_returns_none_on_total_failure(monkeypatch):
     report, history = _report()
 
     assert get_ai_opinion(report, history) is None
-    assert len(calls) == ai_advisor.ATTEMPTS_PER_MODEL * (1 + len(ai_advisor.FALLBACK_MODELS))
+    # One pass over every model, then one retry each for the overloaded ones.
+    assert len(calls) == 2 * len(ai_advisor.STATIC_MODELS)
+
+
+def test_get_ai_opinion_respects_time_budget(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(ai_advisor, "AI_TIME_BUDGET_SECONDS", 0)
+    monkeypatch.setattr(ai_advisor.requests, "post", lambda *a, **k: pytest.fail("called"))
+    report, history = _report()
+
+    assert get_ai_opinion(report, history) is None
+
+
+def test_rank_models_prefers_pro_then_newest():
+    names = [
+        "models/gemini-3.5-flash-lite",
+        "models/gemini-3.8-flash",
+        "models/gemini-3.5-flash",
+        "models/gemini-pro-latest",
+        "models/gemini-3.6-pro",
+        "models/gemini-3.7-flash-preview-tts",
+        "models/gemma-4-27b",
+    ]
+    assert rank_models(names) == [
+        "gemini-3.6-pro",
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+    ]
+
+
+def test_discover_models(monkeypatch):
+    # Undo the autouse stub to test the real function.
+    monkeypatch.setattr(ai_advisor, "discover_models", discover_models)
+    listing = {
+        "models": [
+            {"name": "models/gemini-3.5-flash", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-3.6-flash", "supportedGenerationMethods": ["embedContent"]},
+        ]
+    }
+    monkeypatch.setattr(ai_advisor.requests, "get", lambda *a, **k: _Response(listing))
+    assert discover_models("k") == ["gemini-3.5-flash", *ai_advisor.STATIC_MODELS]
+
+    monkeypatch.setattr(ai_advisor.requests, "get", lambda *a, **k: _Response(status=500))
+    assert discover_models("k") == list(ai_advisor.STATIC_MODELS)
 
 
 def test_email_includes_ai_opinion():
     report, history = _report()
-    opinion = parse_gemini_response(_payload(json.dumps(REPLY)), "gemini-x", used_search=False)
+    opinion = parse_gemini_response(_payload(json.dumps(REPLY)), "gemini-x")
 
     assert "(AI: WAIT)" in build_email_subject(report, opinion)
     assert "AI second opinion: WAIT (medium confidence)" in build_email_body(report, opinion)
@@ -171,7 +293,7 @@ OUTLOOK_REPLY = dict(
 
 
 def test_parse_outlook():
-    opinion = parse_gemini_response(_payload(json.dumps(OUTLOOK_REPLY)), "gemini-x", used_search=False)
+    opinion = parse_gemini_response(_payload(json.dumps(OUTLOOK_REPLY)), "gemini-x")
 
     assert opinion.outlook is not None
     assert opinion.outlook.direction == "up"
@@ -181,7 +303,7 @@ def test_parse_outlook():
 
 def test_parse_outlook_invalid_direction_is_dropped():
     reply = dict(REPLY, outlook={"direction": "moon", "reasoning": "?"})
-    opinion = parse_gemini_response(_payload(json.dumps(reply)), "gemini-x", used_search=False)
+    opinion = parse_gemini_response(_payload(json.dumps(reply)), "gemini-x")
     assert opinion.outlook is None
 
 
@@ -196,7 +318,7 @@ def test_build_prompt_includes_market_context():
 
 def test_email_includes_outlook():
     report, _ = _report()
-    opinion = parse_gemini_response(_payload(json.dumps(OUTLOOK_REPLY)), "gemini-x", used_search=False)
+    opinion = parse_gemini_response(_payload(json.dumps(OUTLOOK_REPLY)), "gemini-x")
 
     body = build_email_body(report, opinion)
 
@@ -219,5 +341,5 @@ def test_plain_call_warns_model_search_is_unavailable(monkeypatch):
 
     get_ai_opinion(report, history)
 
-    assert "tools" not in bodies[0]
+    assert bodies[0]["tools"] == [{"url_context": {}}]
     assert "Web search is unavailable" in bodies[0]["contents"][0]["parts"][0]["text"]
