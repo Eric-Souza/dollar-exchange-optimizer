@@ -2,13 +2,16 @@ name: Daily Exchange Email
 
 on:
   schedule:
-    # Weekdays at 9:00 AM BRT (12:00 UTC)
-    - cron: "0 12 * * 1-5"
+    # Weekdays at ~10:23 BRT (13:23 UTC), after BACEN's first bulletin (~10:05).
+    # Off the top of the hour to reduce GitHub's scheduling delays, which can
+    # still be hours; the report uses whatever quote is latest when it runs.
+    - cron: "23 13 * * 1-5"
   workflow_dispatch:
 
 jobs:
   send-report:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,4 +30,6 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
           EXCHANGE_PERCENTILE_THRESHOLD: ${{ secrets.EXCHANGE_PERCENTILE_THRESHOLD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
         run: python -m src.main

@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date
+from datetime import datetime, timedelta, timezone
 
-from src.analysis import build_report
-from src.email_builder import send_email
-from src.ptax import fetch_month_rates, fetch_rolling_rates
+from src.ai_advisor import ai_enabled, get_ai_opinion
+from src.analysis import Verdict, build_report
+from src.email_builder import build_email_body, build_email_subject, send_email
+from src.market_context import fetch_market_context
+from src.ptax import fetch_history
+
+# Brazil has had no DST since 2019; avoids needing tzdata on Windows.
+BRT = timezone(timedelta(hours=-3))
 
 
 def _env_float(name: str, default: float) -> float:
@@ -36,21 +41,32 @@ def _load_dotenv() -> None:
 def main() -> int:
     _load_dotenv()
 
-    reference = date.today()
+    dry_run = "--dry-run" in sys.argv[1:]
+
+    reference = datetime.now(BRT).date()
     early_month_threshold = _env_float("EXCHANGE_PERCENTILE_THRESHOLD", 75.0)
 
-    month_rates = fetch_month_rates(reference)
-    rolling_rates = fetch_rolling_rates(days=30, reference=reference)
+    history, today_quote = fetch_history(reference)
 
     report = build_report(
-        month_rates=month_rates,
-        rolling_rates=rolling_rates,
+        history=history,
         reference=reference,
+        today_quote=today_quote,
         early_month_threshold=early_month_threshold,
     )
+    ai = None
+    if ai_enabled() and report.verdict != Verdict.NO_QUOTE:
+        ai = get_ai_opinion(report, history, fetch_market_context(reference))
+    ai_label = ai.verdict.value if ai and ai.verdict else "n/a"
 
-    send_email(report)
-    print(f"Email sent: {report.verdict.value} for {reference.isoformat()}")
+    if dry_run:
+        print(build_email_subject(report, ai))
+        print()
+        print(build_email_body(report, ai))
+        return 0
+
+    send_email(report, ai)
+    print(f"Email sent: {report.verdict.value} (AI: {ai_label}) for {reference.isoformat()}")
     return 0
 
 
