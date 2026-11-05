@@ -97,5 +97,14 @@
   "direction": "down",
   "confidence": "low",
   "model": "gemini-3.6-flash"
+ },
+ {
+  "date": "2026-11-05",
+  "rate": 5.4615,
+  "rule_verdict": "EXCHANGE TODAY",
+  "ai_verdict": "EXCHANGE TODAY",
+  "direction": "sideways",
+  "confidence": "low",
+  "model": "gemini-3.6-flash"
  }
 ]
