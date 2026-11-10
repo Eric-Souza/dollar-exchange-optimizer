@@ -1,6 +1,6 @@
 # USD/BRL Daily Exchange Advisor
 
-Sends a daily email recommending the best time to exchange USD salary into Brazilian reais (BRL), using BACEN PTAX rates and percentile-based analysis.
+Sends an email, on demand, recommending the best time to exchange USD salary into Brazilian reais (BRL), using BACEN PTAX rates and percentile-based analysis.
 
 ## How it works
 
@@ -77,7 +77,7 @@ Push this repo to GitHub, then add these **repository secrets** (Settings → Se
 | `GEMINI_MODEL` | Optional; model to try first (default: best available) |
 | `SALARY_USD` | Optional; monthly salary in USD for the BRL calculator |
 
-The workflow is scheduled for **weekdays at ~10:23 BRT** (13:23 UTC), after BACEN's first bulletin. GitHub often delays scheduled runs by an hour or more; the email shows which quote it used (intraday bulletin, closing, or market bid). You can also trigger it manually from the Actions tab via **Run workflow**. The workflow needs `contents: write` (already set in the YAML) to commit the forecast log.
+The workflow runs only when triggered by hand from the Actions tab via **Run workflow** (it used to run on weekdays at ~10:23 BRT, after BACEN's first bulletin). The email shows which quote it used (intraday bulletin, closing, or market bid). The workflow needs `contents: write` (already set in the YAML) to commit the forecast log.
 
 ## Running tests
 

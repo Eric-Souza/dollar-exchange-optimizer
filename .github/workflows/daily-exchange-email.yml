@@ -1,11 +1,8 @@
 name: Daily Exchange Email
 
 on:
-  schedule:
-    # Weekdays at ~10:23 BRT (13:23 UTC), after BACEN's first bulletin (~10:05).
-    # Off the top of the hour to reduce GitHub's scheduling delays, which can
-    # still be hours; the report uses whatever quote is latest when it runs.
-    - cron: "23 13 * * 1-5"
+  # Runs only by hand (Actions -> Daily Exchange Email -> Run workflow). It used to run every weekday at
+  # ~10:23 BRT (cron "23 13 * * 1-5"), after BACEN's first bulletin.
   workflow_dispatch:
 
 # Needed to commit the forecast log back to main.
