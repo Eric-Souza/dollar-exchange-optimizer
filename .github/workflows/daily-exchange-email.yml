@@ -1,8 +1,9 @@
-name: Daily Exchange Email
+name: Weekly Exchange Email
 
 on:
-  # Runs only by hand (Actions -> Daily Exchange Email -> Run workflow). It used to run every weekday at
-  # ~10:23 BRT (cron "23 13 * * 1-5"), after BACEN's first bulletin.
+  schedule:
+    # Every Monday at ~10:23 BRT, after BACEN's first bulletin.
+    - cron: "23 13 * * 1"
   workflow_dispatch:
 
 # Needed to commit the forecast log back to main.
